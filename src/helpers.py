@@ -5,6 +5,8 @@ import os
 import pyBigWig
 from subprocess import check_call, call
 from functools import reduce
+import matplotlib.font_manager as font_manager
+prop = font_manager.FontProperties(fname = "/home/yz2296/miniconda3/lib/python3.7/site-packages/matplotlib/mpl-data/fonts/ttf/arial.ttf")
 
 def run_command(command, **args):
     print("Running command: " + command)
@@ -315,7 +317,7 @@ def count_reads_from_bigwig(bw_file_path, regions):
     if isinstance(regions, pd.DataFrame):
         enh = regions
     else:
-        enh = pybedtools.BedTool(regions).to_dataframe(disable_auto_names=True, header=None)
+        enh = pybedtools_read_without_header(regions)
         
     results = []
     for index in range(len(enh)):
@@ -323,9 +325,55 @@ def count_reads_from_bigwig(bw_file_path, regions):
         start = enh.iloc[index][1]
         end = enh.iloc[index][2]
         sum_expression = abs(np.sum(np.nan_to_num(bw.values(chr, int(start), int(end)))))
-        results.append({"chr": chr, "start": start, "end": end, "expression": sum_expression})
+        results.append({"index": index, "chrom": chr, "start": start, "end": end, "expression": sum_expression})
         # print(f"Total expression in {chr}:{start}-{end} is {sum_expression}")
 
     output = pd.DataFrame(results)
     bw.close()
     return output
+
+
+def judge_grocap_groups(partial_df, bw1, bw2):
+    """ 
+    """
+    for ori in ("p", "n"):
+        one_side_deletion_df = partial_df[partial_df["orientation"]==ori].loc[:, ["chrom", "start", "end"]]
+        forward = count_reads_from_bigwig(bw1, one_side_deletion_df)
+        reverse = count_reads_from_bigwig(bw2, one_side_deletion_df)
+        non_exch_partial = forward.merge(reverse, on=["index", "chrom", "start", "end"])
+        # print(non_exch_partial)
+        if ori == "p":
+            non_exch_partial["TSS_group"] = np.where(non_exch_partial["expression_x"]>non_exch_partial["expression_y"], "maxi", "mini")
+        else:
+            non_exch_partial["TSS_group"] = np.where(non_exch_partial["expression_x"]>non_exch_partial["expression_y"], "mini", "maxi")
+            
+        partial_df.loc[partial_df["orientation"] == ori, "GROcap_signal"] = non_exch_partial["TSS_group"].values
+    partial_df["GROcap_signal"].fillna("b", inplace=True)
+    return partial_df
+
+
+def p_value_to_asterisks(p_value_list):
+    """ 
+    """
+    output = []
+    for p_val in p_value_list:
+        if p_val > 0.05:
+            output.append("n.s.")
+        elif 0.01 < p_val <= 0.05:
+            output.append("*")
+        elif 0.001 < p_val <= 0.01:
+            output.append("**")
+        elif 0.0001 < p_val <= 0.001:
+            output.append("***")
+        else:
+            output.append("****")
+    return output
+
+def pybedtools_read_without_header(bed_path):
+    return pybedtools.BedTool(bed_path).to_dataframe(disable_auto_names=True, header=None)
+
+
+def process_bed_file(filename, prefix):
+    df = pybedtools_read_without_header(filename)
+    df["index"] = prefix + (df.index + 1).astype(str)
+    return df.loc[:, [0, 1, 2, "index"]]

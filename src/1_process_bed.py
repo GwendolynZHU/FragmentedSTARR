@@ -120,6 +120,7 @@ def main(args):
     if args.design == "full":
         extract_reads(ref_file, file_source, args.design, args.outdir, args.starr)
         select_pairs(args.outdir, args.design, args.starr)
+        merge_pairs(args.outdir, args.design, args.starr)
 
     ### Grep the partial enhancer reads
     elif file_source == "PINTS": #partial
