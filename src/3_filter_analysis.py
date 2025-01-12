@@ -14,8 +14,7 @@ import pybedtools
 from pybedtools import BedTool
 import tempfile
 import shutil
-from helpers import judge_grocap_groups, pybedtools_read_without_header, process_bed_file
-from Bio import SeqIO
+from helpers import judge_grocap_groups, pybedtools_read_without_header, process_bed_file, add_svr_predictions
 
 temp_dir = tempfile.mkdtemp()
 pybedtools.helpers.set_tempdir(temp_dir)
@@ -121,105 +120,6 @@ def save_lfc_avg(deseq, design, data_dir, starr, outdir):
     else:
         _save_lfc_avg_full(outdir)
 
-
-def save_tmp_seq(input, design, orientation, outdir):
-    """ 
-    """
-    config = {
-        ("TSS", "p"): (-32, -20, "thickEnd"),
-        ("TSS", "n"): (20, 32, "thickStart"),
-        ("pause_site", "p"): (17, 36, "thickEnd"),
-        ("pause_site", "n"): (-36, -17, "thickStart"),
-    }
-    start, end, column = config[(design, orientation)]
-    df = input.copy()
-    df["seq_start"] = df[column] + start
-    df["seq_end"] = df[column] + end
-    df = df.loc[:,["chrom", "seq_start", "seq_end"]]
-    df = df.astype({"seq_start": int, "seq_end": int})
-    df.to_csv(os.path.join(outdir, "tmp_"+design+"_"+orientation+".bed"), sep="\t", header=None, index=None)
-
-
-def reverse_complement(dna_seq):
-    """ 
-    """
-    complement = {"A": "T", "T": "A", "C": "G", "G": "C"}
-    reverse_complement_seq = "".join(complement[base] for base in reversed(dna_seq))
-    return reverse_complement_seq
-
-
-def fasta_to_txt(orientation, fasta, output_file):
-    """ 
-    """
-    with open (output_file, "w") as out_handle:
-        for record in SeqIO.parse(fasta, "fasta"):
-            sequence = record.seq.upper()
-            if orientation == "r":
-                seq_reversed = reverse_complement(sequence)
-                out_handle.write(f"{seq_reversed}\n")
-            else:
-                out_handle.write(f"{sequence}\n")
-    return output_file
-
-
-def assign_groups(design, prediction_file):
-    """ 
-    """
-    pred_df = pd.read_table(prediction_file)
-    if design == "TSS":
-        conditions = [(pred_df["SVR_score"]>=1), \
-                      (pred_df["SVR_score"]>=0.25)&(pred_df["SVR_score"]<1), (pred_df["SVR_score"]<0.25)]
-        choices = ["StrongTATA", "IntermediateTATA", "NoTATA"]
-    else:
-        conditions = [(pred_df["SVR_score"]>=2), \
-                      (pred_df["SVR_score"]>=0.75)&(pred_df["SVR_score"]<2), \
-                      (pred_df["SVR_score"]>=0.3)&(pred_df["SVR_score"]<0.75), (pred_df["SVR_score"]<0.3)]
-        choices = ["GoodDPR", "IntermediateDPR", "WeakDPR", "NoDPR"]
-        
-    pred_df["Groups"] = np.select(conditions,choices)
-    pred_df.to_csv(prediction_file, sep="\t", header=True, index=None)
-    return pred_df
-
-
-def add_svr_predictions(deseq_df, design, outdir):
-    """ 
-    """
-    svr_dir = os.path.join(outdir, "fetch_seq")
-    os.makedirs(svr_dir, exist_ok=True)
-
-    fasta_ref = "/fs/cbsuhy01/storage/yz2676/ref/hg38.fa"
-    svr_model = "SVRtata_TATAbox.model" if design == "TSS" else "SVRb_DPR.model"
-
-    for orientation in ("p", "n"):
-        df_subselect = deseq_df["orientation"] == orientation
-        deseq = deseq_df[df_subselect]
-        
-        # get the sequence input for svr model
-        save_tmp_seq(deseq, design, orientation, svr_dir)
-        tmp_seq_file = os.path.join(svr_dir, "tmp_"+design+"_"+orientation+".bed")
-        fasta = os.path.join(svr_dir, design+"_"+orientation+".fasta")
-        os.system("bedtools getfasta -fi "+fasta_ref+" -bed "+tmp_seq_file+" -fo "+fasta)
-
-        seq_outfile = os.path.join(svr_dir, design+"_"+orientation+".txt")
-        seq_file = fasta_to_txt(orientation, fasta, seq_outfile)
-
-        # model prediction
-        prediction_file = os.path.join(svr_dir, "prediction_"+design+"_"+orientation+".txt")
-        os.system("/programs/R-4.2.1-r9/bin/Rscript SVRpredict.R -i "+seq_file+" -m "+svr_model+" -o "+prediction_file)
-        prediction_df = assign_groups(design, prediction_file)
-
-        # update final df with svr_predictions
-        if not "Groups" in deseq_df.columns:
-            deseq_df["Groups"] = "nan"
-        deseq_df.loc[df_subselect, "Groups"] = prediction_df["Groups"].values
-        deseq_df.fillna("nan")
-
-    # remove tmp files
-    os.system("rm "+svr_dir+"/"+design+"*")
-    os.system("rm "+svr_dir+"/tmp*")
-    
-    return deseq_df
-    
 
 def get_visualization_script(deseq_file, outdir, starr, ori_dir):
     """ 

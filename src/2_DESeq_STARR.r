@@ -2,7 +2,7 @@
 
 # Sample command to run the script: 
 # /programs/R-4.2.1-r9/bin/Rscript 2_DESeq_STARR.r -o /path_to_file/EnhancerNet --name 5p, 3p
-# /programs/R-4.2.1-r9/bin/Rscript 2_DESeq_STARR.r -o ../new_data --name TSS_p TSS_n TSS_b --RNA_rep 1 2 3 4 --cutoff 10 --starr deep_ATAC_STARR --either TRUE
+# /programs/R-4.2.1-r9/bin/Rscript 2_DESeq_STARR.r -o ../new_data --name TSS_p TSS_n TSS_b pause_site_p pause_site_n pause_site_b INR_p INR_n INR_b --RNA_rep 1 2 3 4 --cutoff 5 --starr deep_ATAC_STARR --either TRUE
 
 write_params <- function(args, file) {
   conn <- file(file, "w")
@@ -345,9 +345,9 @@ if (args$neg_ctrl){
 
 
 # Output full enhancer elements with orientation-independence
-# if (!file.exists(file.path(args$output, args$starr, "full", paste0("srt_full_",orientation_dir,"_e.bed")))){
-#   message("Started searching for enhancers ... ")
+if (!file.exists(file.path(args$output, args$starr, "full", paste0("srt_full_",orientation_dir,"_e.bed")))){
+  message("Started searching for enhancers ... ")
   
-#   full <- read.table(file.path(deseq_directory, "DE_results_full.txt"))
-#   save_enhancers(full, args$output, "full", args$starr, orientation_dir)
-# }
+  full <- read.table(file.path(deseq_directory, "DE_results_full.txt"))
+  save_enhancers(full, args$output, "full", args$starr, orientation_dir)
+}

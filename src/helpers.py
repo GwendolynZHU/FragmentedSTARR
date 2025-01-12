@@ -1,379 +1,245 @@
-import pandas as pd
-import numpy as np
-import pybedtools
 import os
-import pyBigWig
-from subprocess import check_call, call
-from functools import reduce
-import matplotlib.font_manager as font_manager
-prop = font_manager.FontProperties(fname = "/home/yz2296/miniconda3/lib/python3.7/site-packages/matplotlib/mpl-data/fonts/ttf/arial.ttf")
+import subprocess
 
-def run_command(command, **args):
-    print("Running command: " + command)
-    return check_call(command, shell=True, **args)
+import pybedtools
+import pandas as pd
+
+from concurrent.futures import ThreadPoolExecutor
 
 
-def write_params(args, file):
-    with open(file, 'w') as outfile:
-        for arg in vars(args):
-            outfile.write(arg + " " + str(getattr(args, arg)) + "\n")
+def process_chunk(counts_path: str, start: int, num_lines: int
+                  ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """ 
+    Process a chunk of the raw counts file.
 
-
-def grace_period_bins(file, gSize, enh_typ):
+    Args:
+        counts_path (str): Path to a specific replicate STARR raw counts file.
+        start (int): Starting line number of the chunk.
+        num_lines (int): Number of lines to read.
+    
+    Returns:
+        forward, reverse (pd.DataFrame, pd.DataFrame): 
+            Forward and reverse orientation separated raw chunk data.
     """
-    Generate a sorted dataframe of binned fragments for respected bedfiles.
-    Modified: Use 5bp grace period bins for all references. This means that the regions 
-    with at most 5bp differences with the original regions are all counted as 
-    possible bins.
+    chunk = pd.read_csv(counts_path, sep="\t", header=None, 
+                    skiprows=start, nrows=num_lines,
+                    compression="gzip" if counts_path.endswith(".gz") else None)
+    
+    forward = chunk[chunk[3] == "+"]
+    reverse = chunk[chunk[3] == "-"]
+    return forward, reverse
 
-    Parameter file: Dataframe, should be in the bed format of (chr, chromStart, chromEnd, name, score, strand, thickStart, thickEnd) 
-    or at least four required fields (chr, chromStart, chromEnd, name)
-    Parameter gSize: Int, grace period length
-    Parameter enh_typ: String, PINTS or EnhancerNet
+
+def get_orientation_specific_raw_counts(counts_path: str, num_chunks: int
+                                        ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """ 
+    Return the orientation-separated STARR counts file.
+
+    Args:
+        counts_path (str): Path to a specific replicate STARR raw counts file.
+        num_chunks (int): Number of cores to use.
+    
+    Returns:
+        forward_df, reverse_df (pd.DataFrame, pd.DataFrame): 
+            Forward and reverse orientation separated raw counts data.
     """
-    assert enh_typ == "PINTS" or enh_typ == "EnhancerNet", "File input should be either PINTS-formatted or EnhancerNet-formatter"
+    lc_command = "gunzip -c " + counts_path + " | wc -l" if counts_path.endswith(".gz") else "wc -l < " + counts_path
+    total_lines = int(subprocess.run(lc_command, 
+                                        shell=True, 
+                                        stdout=subprocess.PIPE).stdout)
 
+    chunk_size = total_lines // num_chunks
+    if total_lines % num_chunks != 0:
+        chunk_size += 1
+    
+    # Read the counts file parallelly
+    tasks = [(counts_path, i * chunk_size, min(chunk_size, 
+                                        total_lines - i * chunk_size)) for i in range(num_chunks)]
+    
+    # Process the chunks in parallel
+    with ThreadPoolExecutor(max_workers=44) as executor:
+        results = list(executor.map(lambda args: process_chunk(*args), tasks))
+    
+    # Combine all chunks into a single DataFrame
+    forward_chunks = [res[0] for res in results]
+    reverse_chunks = [res[1] for res in results]
+    forward_df = pd.concat(forward_chunks, ignore_index=True)
+    reverse_df = pd.concat(reverse_chunks, ignore_index=True)
+    return forward_df, reverse_df
+
+
+def make_counts_dir(outdir: str, file_source: str, design: str, replicate: str) -> str:
+    """ 
+    Create a directory for storing the processed counts data.
+
+    Args:
+        outdir (str): Path to the output directory.
+        file_source (str): Source of the STARR-seq data.
+        design (str): Name for the design.
+        replicate (str): Replicate number.
+
+    Returns:
+        dir_path (str): Path to the newly created directory.
+    """
+    dir_path = f"{outdir}/{file_source}/{design}/{replicate}"
+    os.makedirs(dir_path, exist_ok=True)
+    return dir_path
+
+
+def generate_region_fragments(file: pd.DataFrame, gSize= 5) -> pd.DataFrame:
+    """
+    Generate a sorted dataframe of targeted fragments.
+    
+    Default resolution is 5bp at the edges: This means that the regions 
+    with at most 5bp differences (on either ends) with the original regions 
+    are all counted as possible matches.
+
+    Args: 
+        file (pd.DataFrame): Input file containing the regions.
+        gSize (int): The resolution of the regions. Default is 5bp.
+
+    Returns:
+        pd.DataFrame: A DataFrame containing all possible regions.
+    """
+    print("Generating regions...\n")
     adjustments = [(i, j) for i in range(-gSize, gSize + 1) for j in range(-gSize, gSize + 1)]
     new_rows = []
 
-    # Iterate over each row only once
-    for _, row in file.iterrows():
+    for row in file.itertuples(index=False):
         for i_sta, i_end in adjustments:
-            new_row = {
-                0: row[0], 
-                1: row[1] + i_sta, 
-                2: row[2] + i_end, 
-                3: row[3], 
-                4: row[4] if enh_typ == "PINTS" else np.nan, 
-                5: row[5] if enh_typ == "PINTS" else np.nan, 
-                6: row[6] if enh_typ == "PINTS" else np.nan, 
-                7: row[7] if enh_typ == "PINTS" else np.nan
-            }
-            new_rows.append(new_row)
+            new_rows.append((
+                row[0], 
+                row[1] + i_sta, 
+                row[2] + i_end, 
+                row[3], row[4], row[5], row[6], row[7]
+            ))
     
-    # Create a DataFrame from all new rows
     new_df = pd.DataFrame(new_rows, columns=file.columns)
-
-    print("Finished generating reference")
-    return new_df.sort_values(by=[0, 1, 2])
+    return new_df.sort_values(by=["chrom", "start", "end"])
 
 
-def get_reference(path, type, idx, starr):
-    """ 
-    Return the orientation-separated counts file in a dataframe for respective replicate.
+def align(starr_counts: pd.DataFrame, region_ref: pd.DataFrame) -> pd.DataFrame:
     """
-    if starr == "deep_ATAC_STARR":
-        if type == "RNA":
-            if idx in [5,6,7]:
-                df2 = pybedtools.BedTool(path+type+str(idx-4)+"/all/count.bed").to_dataframe(disable_auto_names=True, header=None)
-            elif idx in [1,3]:
-                df2 = pybedtools.BedTool(path+type+str(idx)+"/all/count.bed.gz").to_dataframe(disable_auto_names=True, header=None)
-            else:
-                df2 = pybedtools.BedTool(path+type+"1"+"/all/count.bed").to_dataframe(disable_auto_names=True, header=None)
-        else: # DNA
-            df2 = pybedtools.BedTool(path+type+str(idx)+"/all/count.bed.gz").to_dataframe(disable_auto_names=True, header=None)
-    elif starr == "WHG_STARR":
-        df2 = pybedtools.BedTool(path+type+str(idx)+"/all/count.bed").to_dataframe(disable_auto_names=True, header=None)
+    Align the sorted STARR fragment counts with target regions.
+    A reciprocal overlap of 100% is required for a match.
 
-    f = df2[df2[3] == "+"]
-    r = df2[df2[3] == "-"]
-    return f, r
-
-
-### func for align reference with diff grace period bins
-def align(ls):
+    Args:
+        starr_counts (pd.DataFrame): STARR fragment counts.
+        region_ref (pd.DataFrame): Target regions.
+    
+    Returns:
+        pd.DataFrame: A DataFrame containing the aligned STARR fragment counts.
+        a list that contains 100% sequence coverage file:
+    (chr, start, end, counts) #TODO: check if this is the correct format
     """
-    Align the sorted STARR-seq segments with different grace period bins.
-    Return a list that contains 100% sequence coverage file:
-    (chr, start, end, counts)
-    """
-    input = pybedtools.BedTool.from_dataframe(ls[0]) # forward/reverse counts.bed.gz
-    file = pybedtools.BedTool.from_dataframe(ls[1]) # binned reference
-    enh_typ = ls[2] # PINTS or EnhancerNet
-    count_idx = 8 if enh_typ == "PINTS" else 4
-    # print(file)
-    overlap = file.coverage(input, sorted=True, counts=True, f=1.0, r=True, n=48)
+    starr_counts = pybedtools.BedTool.from_dataframe(starr_counts)
+    region_ref = pybedtools.BedTool.from_dataframe(region_ref)
+
+    overlap = region_ref.coverage(starr_counts, sorted=True, counts=True, f=1.0, r=True, n=44)
     overlap = overlap.to_dataframe(disable_auto_names=True, header=None)
-    overlap = overlap.rename(columns={count_idx: "overlap"})
+    overlap = overlap.rename(
+        columns={0: "chrom", 
+                 1: "start",
+                 2: "end",
+                 3: "name",
+                 4: "score",
+                 5: "strand",
+                 6: "thickStart",
+                 7: "thickEnd",
+                 8: "overlap"})
+    
     overlap = overlap[overlap["overlap"]==1].reset_index(drop=True)
     return overlap
 
 
-def count_mapped_bins(starr, counts, ori_ref, ref, data_type, idx, design, orientation, out_dir):
-    # def count_mapped_bins(UMI, counts, ori_ref, ref): # for test
-    """ 
-    Need to go to the original orientation separated counts.bed.gz file 
-    to sum up the overlapped bins read counts if necessary (RNA).
-    Sum the reads from fragmented bins.
-
-    Parameter starr: string; deep_ATAC_STARR or WHG_STARR, together with data_type determine UMI - True for RNA, False for DNA (deepATAC)
-    Parameter counts: dataframe (aligned fragmented bins counts) from pybedtools.coverage
-    Parameter ori_ref: dataframe (elements regions after design)
-    Parameter ref: forward/reverse counts.bed.gz file
-    Parameter data_type: string, DNA or RNA
-    Parameter idx: string, 1-6 for DNA, 1-7 for RNA
-    Parameter design: string, e.g. TSS_b
-    Parameter orientation: string, f or r (forward or reverse)
-    Parameter out_dir: string
+def align_wrapper(args):
     """
-    ref = ref.rename(columns={4: "count"})
+    Wrapper function to align the STARR counts with target regions.
 
-    if starr == "deep_ATAC_STARR" and data_type == "RNA": # RNA samples
-        ## replace the reads since the dataset has already been deduplicated with UMI
-        ## also merge the fragmented bins through element id
-        # counts = counts.merge(ref, on=[0,1,2], how="inner")
-        # print(counts)
-        counts["count"] = ref.merge(counts, on=[0,1,2], how="inner").loc[:,["count"]]
-        counts = counts.loc[:,[0,1,2,3,"count"]]
-        counts = counts.groupby(3, as_index=True).agg({0: 'first', 1: 'first', 2: 'first', "count": 'sum'})
-
-
-    else: # DNA samples
-        ## merge the fragmented bins through element id
-        ref["count"] = 1
-        counts = counts.merge(ref, on=[0,1,2], how="inner").loc[:,[0,1,2,"3_x","count"]]
-        counts = counts.groupby("3_x", as_index=True).agg({0: 'first', 1: 'first', 2: 'first', "count": 'sum'})
-
-    ## replace the values of fragmented bins by original values retrieved from element id
-    if not counts.empty:
-        merged_df = counts.merge(ori_ref, left_index=True, right_on=3, how='left')
-        
-        output = merged_df.loc[:, ["0_y","1_y", "2_y", "count"]]
-        # print(output)
-    else:
-        output = pd.DataFrame()
+    Args:
+        args (tuple): A tuple containing the STARR counts and target regions.
     
-    # output.to_csv("/fs/cbsuhy01/storage/yz2676/data/STARR-seq/partial/data/deep_ATAC_STARR/DNA/"+data_type+idx+"_"+orientation+"_"+design+".bed", sep='\t', index=False, header=False)
-    output.to_csv(out_dir+"/"+data_type+str(idx)+"_"+orientation+"_"+design+".bed", sep='\t', index=False, header=False)
-
-
-def append_file(out_dir, design, orie, dnas, rnas, starr):
-    """ 
-    Load the files.
+    Returns:
+        pd.DataFrame: A DataFrame containing the aligned STARR counts.
     """
-    DNA_files = []
-    RNA_files = []
+    return align(*args)
 
-    for idx in dnas:
-        outdir = ("{0}/"+starr+"/"+design+"/DNA/DNA{1}").format(out_dir, idx)
-        DNA_files.append(outdir+"/DNA"+str(idx)+"_"+orie+"_"+design+".bed")
-    for idx in rnas:
-        outdir = ("{0}/"+starr+"/"+design+"/RNA/RNA{1}").format(out_dir, idx)
-        RNA_files.append(outdir+"/RNA"+str(idx)+"_"+orie+"_"+design+".bed")
 
-    ls = DNA_files + RNA_files
-    input_ls = [] 
-    for index in range(len(ls)):
-        file = pybedtools.BedTool(ls[index])
-        if file == "": # deal with completely nan file
-            print("File {} is empty".format(ls[index]))
-            # need to append the coordinates and zeros as placeholders, or it cannot merge in the next step??
-            df = pd.DataFrame({0:["chrN"],1:[1.0],2:[2.0],3:[0.0]})
-            input_ls.append(df) 
+def count_mapped_fragments(aligned_counts: pd.DataFrame, raw_counts_df: pd.DataFrame,
+                           original_ref_df: pd.DataFrame, umi: bool, 
+                           out_dir: str, orientation: str):
+        """
+        Count the mapped fragments and save the data.
+
+
+        Args:
+            aligned_counts (pd.DataFrame): Aligned fragment counts.
+            raw_counts_df (pd.DataFrame): Raw STARR counts.
+            original_ref_df (pd.DataFrame): Original reference regions.
+            umi (bool): Whether the original dataset deduplicated using UMI.
+            out_dir (str): Path to the output directory.
+        """
+        raw_counts_df = raw_counts_df.rename(
+                columns={0: "chrom", 
+                         1: "start", 
+                         2: "end", 
+                         3: "strand", 
+                         4: "counts"})
+
+        if umi: # already UMI deduplicated - sum the counts in raw data
+            aligned_counts["count"] = raw_counts_df.merge(aligned_counts, 
+                                                on=["chrom", "start", "end"], how="inner")["counts"]
+            aligned_counts = aligned_counts.loc[:, ["name", "count"]]
         else:
-            output_file = file.to_dataframe(disable_auto_names=True, header=None)
-            input_ls.append(output_file)
+            aligned_counts = aligned_counts.loc[:, ["name", "overlap"]]
+            aligned_counts = aligned_counts.rename(columns={"overlap": "count"})
 
-    return input_ls
+        aligned_counts = aligned_counts.groupby("name", as_index=True).agg(
+                                                {"count": "sum"})
 
-
-def safe_sort(input, output):
-    """ 
-    """
-    call("sort -k1,1 -k2,2n -V " + input + " > " + output, shell=True)
-
-
-### func for combining results from biological repeats + DNA/RNA
-def combine(input_list, outdir, design, orie, starr):
-    """
-    Combine the alignment files into a big matrix.
-    """
-    output_1 = input_list[0].merge(input_list[1], how="outer",left_on=[0,1,2],right_on=[0,1,2], suffixes=('_1', '_2'))
-    output_2 = output_1.merge(input_list[2], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_3"})
-    output_3 = output_2.merge(input_list[3], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_4"})
-    if starr == "deep_ATAC_STARR":
-        output_4 = output_3.merge(input_list[4], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_5"})
-        output_5 = output_4.merge(input_list[5], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_6"})
-        output_6 = output_5.merge(input_list[6], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_7"})
-        output_7 = output_6.merge(input_list[7], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_8"})
-        output_8 = output_7.merge(input_list[8], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_9"})
-        output_9 = output_8.merge(input_list[9], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_10"})
-        output_10 = output_9.merge(input_list[10], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_11"})
-        output_11 = output_10.merge(input_list[11], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_12"})
-        output_12 = output_11.merge(input_list[12], how="outer",left_on=[0,1,2],right_on=[0,1,2]).rename(columns={3:"3_13"})
-        output_12 = output_12.fillna(0)
-
-        output_df = output_12[output_12[0] != "chrN"]
-
-    elif starr == "WHG_STARR":
-        output_3 = output_3.fillna(0)
-        output_df = output_3[output_3[0] != "chrN"]
-
-    # print(output_12)
-    unsrt_path = outdir+"/"+starr+"/"+design+"/"+design+"_"+orie+".bed"
-    srt_path = outdir+"/"+starr+"/"+design+"/srt_"+design+"_"+orie+".bed"
-    output_df.to_csv(unsrt_path, sep='\t', index=False, header=False)
-    safe_sort(unsrt_path, srt_path)
-    cmds = ["rm " + unsrt_path]
-    
-    for cmd in cmds:
-        os.system(cmd)
-
-
-### func for subsetting both-orientations available elements
-def select_pairs(outdir, design, starr):
-    """ 
-    """
-    forward = pybedtools.BedTool(outdir+"/"+starr+"/"+design+"/srt_"+design+"_f.bed").to_dataframe(disable_auto_names=True, header=None)
-    reverse = pybedtools.BedTool(outdir+"/"+starr+"/"+design+"/srt_"+design+"_r.bed").to_dataframe(disable_auto_names=True, header=None)
-
-    overlap = pd.merge(forward, reverse, how ='inner', on = [0, 1, 2])
-    if starr == "deep_ATAC_STARR":
-        fd = overlap.iloc[:,0:16]
-        rv = overlap.iloc[:,list(range(0, 3)) + list(range(16, 29))]
-    elif starr == "WHG_STARR":
-        fd = overlap.iloc[:,0:7]
-        rv = overlap.iloc[:,list(range(0, 3)) + list(range(7, 11))]
-    # print(rv)
-    # print("full: ", len(overlap))cd
-    fd.to_csv(outdir+"/"+starr+"/"+design+"/srt_"+design+"_f.bed", sep='\t', index=False, header=False)
-    rv.to_csv(outdir+"/"+starr+"/"+design+"/srt_"+design+"_r.bed", sep='\t', index=False, header=False)
-    print("Pairwise elements saved.")
-
-    set1 = set(tuple(row) for row in forward.loc[:,[0,1,2]].to_numpy())
-    set2 = set(tuple(row) for row in reverse.loc[:,[0,1,2]].to_numpy())
-    unique_to_df1 = set1 - set2
-    unique_to_df2 = set2 - set1
-    unique_to_df1_df = forward[forward[[0,1,2]].apply(tuple, axis=1).isin(unique_to_df1)]
-    unique_to_df2_df = reverse[reverse[[0,1,2]].apply(tuple, axis=1).isin(unique_to_df2)]
-
-    unpaired_dir = outdir+"/"+starr+"/"+design+"/unpaired/"
-    os.makedirs(unpaired_dir, exist_ok=True)
-
-    unique_to_df1_df.to_csv(unpaired_dir+"srt_full_either_f.bed", header=False, index=False, sep="\t")
-    unique_to_df2_df.to_csv(unpaired_dir+"srt_full_either_r.bed", header=False, index=False, sep="\t")
-    print("Either orientation elements saved.")
-
-
-### func for merging forward/reverse elements
-def merge_pairs(outdir, design, starr):
-    """ 
-    chr, design start, design end
-    """
-    forward = pybedtools.BedTool(outdir+"/"+starr+"/"+design+"/srt_"+design+"_f.bed").to_dataframe(disable_auto_names=True, header=None)
-    reverse = pybedtools.BedTool(outdir+"/"+starr+"/"+design+"/srt_"+design+"_r.bed").to_dataframe(disable_auto_names=True, header=None)
-
-    ovl = pd.concat([forward,reverse],ignore_index=True).groupby([0,1,2]).sum().reset_index()
-    
-    print(ovl)
-    
-    ovl.to_csv(outdir+"/"+starr+"/"+design+"/srt_"+design+".bed", sep='\t', index=False, header=False)
-    print("Forward & reverse reads combined for {}".format(design))
-
-
-### func for generating partial elements
-def generate_partial_elements(input_file, outdir):
-    """
-    Generate bedfile for all designs.
-    """
-    full_enh = pybedtools.BedTool(input_file).to_dataframe()
-
-    config = {
-        ("pause_site", "b"): (-15,-15,"pause_site_b"),
-        ("pause_site", "p"): (0,-15,"pause_site_p"),
-        ("pause_site", "n"): (-15,0,"pause_site_n"),
-        ("TSS", "b"): (32,32,"TSS_b"),
-        ("TSS", "p"): (0,32,"TSS_p"),
-        ("TSS", "n"): (32,0,"TSS_n"),
-        ("INR", "b"): (1,1,"INR_b"),
-        ("INR", "p"): (0,1,"INR_p"),
-        ("INR", "n"): (1,0,"INR_n")
-    }
-
-    for (condition, strand) in config.keys():
-        start, end, name = config.get((condition, strand))
-
-        partial = full_enh.copy()
-        
-        partial["start"] = full_enh["thickStart"] + start if start != 0 else full_enh["start"]
-        partial["end"] = full_enh["thickEnd"] - end if end != 0 else full_enh["end"]
-        partial = partial[partial["end"]-partial["start"]>=40]
-        partial = partial[partial["chrom"] != "chrM"]
-        partial = partial[partial["start"] >= 0]
-
-        out_path = outdir + "/design_ref"
-        os.makedirs(out_path, exist_ok=True)
-
-        out_file = out_path + "/divergent_60bp_without_" + name + ".bed"
-        partial.to_csv(out_file, sep="\t", header=False, index=False)
-    
-    print("Finished generating partial deletion references.")
-
-
-def count_reads_from_bigwig(bw_file_path, regions):
-    """ 
-    """
-    bw = pyBigWig.open(bw_file_path)
-    if isinstance(regions, pd.DataFrame):
-        enh = regions
-    else:
-        enh = pybedtools_read_without_header(regions)
-        
-    results = []
-    for index in range(len(enh)):
-        chr = enh.iloc[index][0]
-        start = enh.iloc[index][1]
-        end = enh.iloc[index][2]
-        sum_expression = abs(np.sum(np.nan_to_num(bw.values(chr, int(start), int(end)))))
-        results.append({"index": index, "chrom": chr, "start": start, "end": end, "expression": sum_expression})
-        # print(f"Total expression in {chr}:{start}-{end} is {sum_expression}")
-
-    output = pd.DataFrame(results)
-    bw.close()
-    return output
-
-
-def judge_grocap_groups(partial_df, bw1, bw2):
-    """ 
-    """
-    for ori in ("p", "n"):
-        one_side_deletion_df = partial_df[partial_df["orientation"]==ori].loc[:, ["chrom", "start", "end"]]
-        forward = count_reads_from_bigwig(bw1, one_side_deletion_df)
-        reverse = count_reads_from_bigwig(bw2, one_side_deletion_df)
-        non_exch_partial = forward.merge(reverse, on=["index", "chrom", "start", "end"])
-        # print(non_exch_partial)
-        if ori == "p":
-            non_exch_partial["TSS_group"] = np.where(non_exch_partial["expression_x"]>non_exch_partial["expression_y"], "maxi", "mini")
+        # Reassign chr, start, and end given the name index
+        if not aligned_counts.empty:
+            annotated_aligned_counts = aligned_counts.merge(original_ref_df, 
+                                                left_index=True, right_on="name", how="left").reset_index()
+            annotated_aligned_counts = annotated_aligned_counts.loc[:, ["chrom", "start", "end", "name", "count"]]
         else:
-            non_exch_partial["TSS_group"] = np.where(non_exch_partial["expression_x"]>non_exch_partial["expression_y"], "mini", "maxi")
-            
-        partial_df.loc[partial_df["orientation"] == ori, "GROcap_signal"] = non_exch_partial["TSS_group"].values
-    partial_df["GROcap_signal"].fillna("b", inplace=True)
-    return partial_df
+            annotated_aligned_counts = pd.DataFrame()
+
+        # Save the counts data
+        out_path = out_dir + "/aligned_count_" + orientation + ".bed"
+        annotated_aligned_counts.to_csv(out_path, sep="\t", header=False, index=False)
 
 
-def p_value_to_asterisks(p_value_list):
-    """ 
+def combine_replicates(file_list: list[str], out_dir: str, orientation: str, ):
     """
-    output = []
-    for p_val in p_value_list:
-        if p_val > 0.05:
-            output.append("n.s.")
-        elif 0.01 < p_val <= 0.05:
-            output.append("*")
-        elif 0.001 < p_val <= 0.01:
-            output.append("**")
-        elif 0.0001 < p_val <= 0.001:
-            output.append("***")
+    Combine the replicate data into a single file.
+
+    Args:
+        file_list (list[str]): List of paths to the replicate files.
+        out_dir (str): Path to the output directory.
+        orientation (str): Orientation of the data.
+    """
+    combined_df = None
+
+    for idx, filepath in enumerate(file_list):
+        file = pybedtools.BedTool(filepath).to_dataframe(disable_auto_names=True, header=None)
+        if file.empty:
+            print(f"Skipping empty file: {filepath}")
+            continue
+        
+        file = file.rename(columns={4: f"value_{idx}"})
+        if combined_df is None:
+            combined_df = file
         else:
-            output.append("****")
-    return output
+            combined_df = pd.merge(
+                combined_df, file, on=[0, 1, 2, 3], how="outer"
+            )
+            combined_df = combined_df.fillna(0)
 
-def pybedtools_read_without_header(bed_path):
-    return pybedtools.BedTool(bed_path).to_dataframe(disable_auto_names=True, header=None)
+    combined_df["numeric_part"] = combined_df[3].str.extract(r"(\d+)").astype(int)
+    combined_df = combined_df.sort_values(by="numeric_part").drop(columns="numeric_part")
 
+    combined_out_path = out_dir + "/combined_counts_" + orientation + ".bed"
+    combined_df.to_csv(combined_out_path, sep="\t", header=False, index=False)
 
-def process_bed_file(filename, prefix):
-    df = pybedtools_read_without_header(filename)
-    df["index"] = prefix + (df.index + 1).astype(str)
-    return df.loc[:, [0, 1, 2, "index"]]
+    
