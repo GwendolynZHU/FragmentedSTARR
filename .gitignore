@@ -1,5 +1,6 @@
 ### Project-related directories
 data/
+output/
 
 ### Default directories
 __pycache__
