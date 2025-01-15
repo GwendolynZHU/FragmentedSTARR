@@ -3,6 +3,7 @@ import subprocess
 
 import pybedtools
 import pandas as pd
+pd.set_option('future.no_silent_downcasting', True)
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -102,6 +103,7 @@ def generate_region_fragments(file: pd.DataFrame, gSize= 5) -> pd.DataFrame:
         pd.DataFrame: A DataFrame containing all possible regions.
     """
     print("Generating regions...\n")
+    file = file.iloc[:, :4]
     adjustments = [(i, j) for i in range(-gSize, gSize + 1) for j in range(-gSize, gSize + 1)]
     new_rows = []
 
@@ -111,7 +113,7 @@ def generate_region_fragments(file: pd.DataFrame, gSize= 5) -> pd.DataFrame:
                 row[0], 
                 row[1] + i_sta, 
                 row[2] + i_end, 
-                row[3], row[4], row[5], row[6], row[7]
+                row[3],
             ))
     
     new_df = pd.DataFrame(new_rows, columns=file.columns)
@@ -142,11 +144,7 @@ def align(starr_counts: pd.DataFrame, region_ref: pd.DataFrame) -> pd.DataFrame:
                  1: "start",
                  2: "end",
                  3: "name",
-                 4: "score",
-                 5: "strand",
-                 6: "thickStart",
-                 7: "thickEnd",
-                 8: "overlap"})
+                 4: "overlap"})
     
     overlap = overlap[overlap["overlap"]==1].reset_index(drop=True)
     return overlap
@@ -225,7 +223,7 @@ def combine_replicates(file_list: list[str], out_dir: str, orientation: str, ):
         file = pybedtools.BedTool(filepath).to_dataframe(disable_auto_names=True, header=None)
         if file.empty:
             print(f"Skipping empty file: {filepath}")
-            continue
+            file = pd.DataFrame({0: ["chrN"], 1: [0], 2: [0], 3: [""], 4: [0]})
         
         file = file.rename(columns={4: f"value_{idx}"})
         if combined_df is None:
@@ -235,6 +233,7 @@ def combine_replicates(file_list: list[str], out_dir: str, orientation: str, ):
                 combined_df, file, on=[0, 1, 2, 3], how="outer"
             )
             combined_df = combined_df.fillna(0)
+            combined_df = combined_df[combined_df[0] != "chrN"]
 
     combined_df["numeric_part"] = combined_df[3].str.extract(r"(\d+)").astype(int)
     combined_df = combined_df.sort_values(by="numeric_part").drop(columns="numeric_part")
