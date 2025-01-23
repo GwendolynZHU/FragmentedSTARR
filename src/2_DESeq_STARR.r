@@ -12,6 +12,7 @@ suppressPackageStartupMessages({
     library(DESeq2)
     library(dplyr)
     library(edgeR)
+    library("R.utils")
 });
 #################################################
 ##### Constants #####
@@ -76,10 +77,6 @@ setup_parser <- function() {
                         default=FALSE, 
                         help="whether to use cpm_filter (stringent)")
 
-    parser$add_argument("--either", 
-                        default=FALSE, 
-                        help="Whether to include either-orientation enhancers")
-
     args <- parser$parse_args()
     return(args)
 }
@@ -87,11 +84,11 @@ setup_parser <- function() {
 
 # Helper function to read files
 read_file <- function(design) {
-    forward_file <- read.table(file.path(getwd(), args$output, args$starr, design, "combined_counts_f.bed"))
-    reverse_file <- read.table(file.path(getwd(), args$output, args$starr, design, "combined_counts_r.bed"))
+    forward_file <- read.table(file.path(getwd(), args$output, args$starr, design, "combined_counts_f.txt"))
+    reverse_file <- read.table(file.path(getwd(), args$output, args$starr, design, "combined_counts_r.txt"))
 
-    rownames(forward_file) <- paste0(design, ":", "forward_", 1:nrow(forward_file), ":", forward_file$V4)
-    rownames(reverse_file) <- paste0(design, ":", "reverse_", 1:nrow(reverse_file), ":", reverse_file$V4)
+    rownames(forward_file) <- paste0(design, ":forward:", forward_file$V4)
+    rownames(reverse_file) <- paste0(design, ":reverse:", reverse_file$V4)
     return (rbind(forward_file, reverse_file))
 }
 
@@ -139,7 +136,7 @@ save_zscore_file <- function(result, control_indexes, deseq_directory) {
 
     lfc_file <- file.path(deseq_directory, "LogFC_cutoff.txt")
     message(paste("LogFC cutoff:", logFC_cutoff))
-    writeLines(paste("LogFC cutoff:", logFC_cutoff), lfc_file)
+    writeLines(paste(logFC_cutoff), lfc_file)
 
     return(list(result = result, logFC_cutoff = logFC_cutoff))
 }
@@ -225,7 +222,7 @@ DESeq_with_ctrl <- function(data, args, deseq_directory) {
 
 ##### Main function #####
 main <- function(args) {
-    deseq_directory <- file.path(args$output, "DESeq2")
+    deseq_directory <- file.path(args$output, args$starr, "DESeq2")
     if (!dir.exists(deseq_directory)) {
         dir.create(deseq_directory)
     }
@@ -239,21 +236,28 @@ main <- function(args) {
         stop("Invalid STARR-seq data source")
     }
 
+    if (args$starr == "WHG-STARR") {
+        args$DNA_rep <- c(1)
+        args$RNA_rep <- c(1,2,3)
+    }
+
     # Generate DESeq2 table (including negative control)
     if (file.exists(args$ctrl_file)) {
         message("Generating DESeq2 table ... ")
-
-        # Read in the data
-        design_count_table <- lapply(args$design, function(design) {
-            read_file(design)
-        })
-        # print(dim(design_count_table[[1]]))
-        # print(design_count_table[[1]][1:5,])
-        combined_count_table <- do.call(rbind, design_count_table)
+    } else if (args$starr == "WHG-STARR") {
+        message("Control file not found. Decompressing required files ...")
+        gunzip(file.path("data", "normalization", "srt_WHG_exon_ctrl.txt.gz"), remove=FALSE)
     } else {
         stop("Check to make sure the negative control files exists at \
             data/normalization/")
     }
+    # Read in the data
+    design_count_table <- lapply(args$design, function(design) {
+        read_file(design)
+    })
+    # print(dim(design_count_table[[1]]))
+    # print(design_count_table[[1]][1:5,])
+    combined_count_table <- do.call(rbind, design_count_table)
 
     # Perform DESeq2 analysis
     DESeq_with_ctrl(combined_count_table, args, deseq_directory)
