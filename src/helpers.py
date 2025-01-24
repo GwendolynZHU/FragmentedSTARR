@@ -69,20 +69,21 @@ def get_orientation_specific_raw_counts(counts_path: str, num_chunks: int
     return forward_df, reverse_df
 
 
-def make_counts_dir(outdir: str, file_source: str, design: str, replicate: str) -> str:
+def make_counts_dir(outdir: str, file_source: str, resolution: int, design: str, replicate: str) -> str:
     """ 
     Create a directory for storing the processed counts data.
 
     Args:
         outdir (str): Path to the output directory.
         file_source (str): Source of the STARR-seq data.
+        resolution (int): Resolution of the data.
         design (str): Name for the design.
         replicate (str): Replicate number.
 
     Returns:
         dir_path (str): Path to the newly created directory.
     """
-    dir_path = f"{outdir}/{file_source}/{design}/{replicate}"
+    dir_path = f"{outdir}/{file_source}_{resolution}/{design}/{replicate}"
     os.makedirs(dir_path, exist_ok=True)
     return dir_path
 
@@ -238,7 +239,7 @@ def combine_replicates(file_list: list[str], out_dir: str, orientation: str, ):
     combined_df["numeric_part"] = combined_df[3].str.extract(r"(\d+)").astype(int)
     combined_df = combined_df.sort_values(by="numeric_part").drop(columns="numeric_part")
 
-    combined_out_path = out_dir + "/combined_counts_" + orientation + ".bed"
+    combined_out_path = out_dir + "/combined_counts_" + orientation + ".txt"
     combined_df.to_csv(combined_out_path, sep="\t", header=False, index=False)
 
     

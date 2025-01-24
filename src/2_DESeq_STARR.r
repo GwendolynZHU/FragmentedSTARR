@@ -52,6 +52,11 @@ setup_parser <- function() {
                         default="deep-ATAC-STARR", 
                         help="File source of STARR-seq data")
 
+    parser$add_argument("--resolution", 
+                        type="integer",
+                        default=5,
+                        help="Resolution of the data (same as previous script)")
+
     parser$add_argument("--DNA_rep", 
                         type="integer", 
                         nargs="+", 
@@ -84,8 +89,10 @@ setup_parser <- function() {
 
 # Helper function to read files
 read_file <- function(design) {
-    forward_file <- read.table(file.path(getwd(), args$output, args$starr, design, "combined_counts_f.txt"))
-    reverse_file <- read.table(file.path(getwd(), args$output, args$starr, design, "combined_counts_r.txt"))
+    forward_file <- read.table(file.path(getwd(), args$output, paste(args$starr, str(args$resolution), sep = "_"), 
+                                        design, "combined_counts_f.txt"))
+    reverse_file <- read.table(file.path(getwd(), args$output, paste(args$starr, str(args$resolution), sep = "_"), 
+                                        design, "combined_counts_r.txt"))
 
     rownames(forward_file) <- paste0(design, ":forward:", forward_file$V4)
     rownames(reverse_file) <- paste0(design, ":reverse:", reverse_file$V4)
@@ -222,7 +229,7 @@ DESeq_with_ctrl <- function(data, args, deseq_directory) {
 
 ##### Main function #####
 main <- function(args) {
-    deseq_directory <- file.path(args$output, args$starr, "DESeq2")
+    deseq_directory <- file.path(args$output, paste(args$starr, str(args$resolution), sep = "_"), "DESeq2")
     if (!dir.exists(deseq_directory)) {
         dir.create(deseq_directory)
     }

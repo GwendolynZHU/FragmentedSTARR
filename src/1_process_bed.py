@@ -152,14 +152,16 @@ class ProcessSTARRDeepATAC(ProcessSTARR):
 
         for dna_idx in range(1, self.dnas + 1):
             print("Mapping to DNA replicate " + str(dna_idx) + "... ")
-            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.design, f"DNA{dna_idx}")
+            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.resolution, 
+                                               args.design, f"DNA{dna_idx}")
 
             dna_raw_count_path = self.DNA_path + f"DNA{dna_idx}/all/count.bed.gz"
             super().process_replicate(dna_raw_count_path, elements_df, input_file_df, self.dna_umi, dir_path)
             
         for rna_idx in range(1, self.rnas + 1):
             print("Mapping to RNA replicate " + str(rna_idx) + "... ")
-            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.design, f"RNA{rna_idx}")
+            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.resolution,
+                                               args.design, f"RNA{rna_idx}")
 
             rna_paths = {
                 1: "RNA1/all/count.bed.gz",
@@ -208,14 +210,16 @@ class ProcessSTARRWHG(ProcessSTARR):
 
         for dna_idx in range(1, self.dnas + 1):
             print("Mapping to DNA replicate " + str(dna_idx) + "... ")
-            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.design, f"DNA{dna_idx}")
+            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.resolution,
+                                               args.design, f"DNA{dna_idx}")
 
             dna_raw_count_path = self.DNA_path + f"DNA{dna_idx}/all/count.bed"
             super().process_replicate(dna_raw_count_path, elements_df, input_file_df, self.dna_umi, dir_path)
 
         for rna_idx in range(1, self.rnas + 1):
             print("Mapping to RNA replicate " + str(rna_idx) + "... ")
-            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.design, f"RNA{rna_idx}")
+            dir_path = helpers.make_counts_dir(args.outdir, args.file_source, args.resolution,
+                                               args.design, f"RNA{rna_idx}")
 
             rna_raw_count_path = self.RNA_path + f"RNA{rna_idx}/all/count.bed"
             super().process_replicate(rna_raw_count_path, elements_df, input_file_df, self.rna_umi, dir_path)
