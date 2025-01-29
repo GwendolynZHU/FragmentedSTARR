@@ -89,9 +89,11 @@ setup_parser <- function() {
 
 # Helper function to read files
 read_file <- function(design) {
-    forward_file <- read.table(file.path(getwd(), args$output, paste(args$starr, str(args$resolution), sep = "_"), 
+    forward_file <- read.table(file.path(getwd(), args$output, paste0(args$starr, "_",
+                                        as.character(args$resolution)), 
                                         design, "combined_counts_f.txt"))
-    reverse_file <- read.table(file.path(getwd(), args$output, paste(args$starr, str(args$resolution), sep = "_"), 
+    reverse_file <- read.table(file.path(getwd(), args$output, paste0(args$starr, "_", 
+                                        as.character(args$resolution)), 
                                         design, "combined_counts_r.txt"))
 
     rownames(forward_file) <- paste0(design, ":forward:", forward_file$V4)
@@ -229,7 +231,8 @@ DESeq_with_ctrl <- function(data, args, deseq_directory) {
 
 ##### Main function #####
 main <- function(args) {
-    deseq_directory <- file.path(args$output, paste(args$starr, str(args$resolution), sep = "_"), "DESeq2")
+    deseq_directory <- file.path(args$output, paste0(args$starr, "_", 
+                            as.character(args$resolution)), "DESeq2")
     if (!dir.exists(deseq_directory)) {
         dir.create(deseq_directory)
     }
