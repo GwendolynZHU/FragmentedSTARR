@@ -1,12 +1,20 @@
+import os
 import argparse
 
 import pandas as pd
 import numpy as np
 
+import helpers
+
 class ExtractEnhancer:
     """
     Extract enhancers given the DESeq2 results.
     """
+    def __init__(self):
+        self.svr_dpr = "src/SVRb_DPR.model"
+        self.svr_tata = "src/SVRtata_TATAbox.model"
+        self.fasta = "data/reference/hg38.fa"
+    
     @staticmethod
     def add_arguments(parser):
         """
@@ -38,6 +46,22 @@ class ExtractEnhancer:
 
         parser.add_argument("--annotate_extra", default=False, action="store_true",
                             help="Whether to annotate extra elements information.")
+        
+        parser.add_argument("--original_bed", nargs="+",
+                            help="Path to the original bed file(s). \
+                            Must be in the same order as the design names. \
+                            Required if --annotate_extra or --core_promoter is True.")
+        
+        parser.add_argument("--annotate_bigwig", default=False, action="store_true",
+                            help="Whether to annotate prominent TSSs.")
+        
+        parser.add_argument("--bigwig", default=None, type=str, nargs="+",
+                            help="Path to the bigwig files. \
+                            Must be in the same order of plus, minus strand, \
+                            Required if --annotate_bigwig is True.")
+
+        parser.add_argument("--core_promoter", default=False, action="store_true",
+                            help="Whether to annotate core promoters.")
 
     def annotate_enhancers(self, args):
         """
@@ -61,17 +85,37 @@ class ExtractEnhancer:
                                                        design_dir, args.either, 
                                                        args.padj, args.logfc)
             if not extract_enhancers.empty:
-                enhancer_file_path = f"{deseq_dir}/{design}_lfc.txt"
-                extract_enhancers.to_csv(enhancer_file_path, sep="\t", 
-                                         index=False, header=True)
-                if args.annotate_extra:
-                    raise NotImplementedError("Extra annotation is not implemented yet.")
+                if args.original_bed:
+                    original_bed_design = args.original_bed[args.design.index(design)]
+                    if "full" in design.lower():
+                        full_original = original_bed_design
+
+                if args.annotate_extra and not args.original_bed:
+                    raise ValueError("Please provide the path to the original bed file(s).")
+                elif args.annotate_extra:
+                    extract_enhancers = self.annotate_extra_columns(
+                                            extract_enhancers, original_bed_design)
                 
                 if args.calc_active_rate:
                     active_rate_file = f"{deseq_dir}/{design}_active_rate.txt"
                     self.calculate_active_rate(design, extract_enhancers, 
                                                active_rate_file)
+                
+                if args.annotate_bigwig and not args.bigwig:
+                    raise ValueError("Please provide the path to the bigwig files.")
+                elif args.annotate_bigwig:
+                    extract_enhancers = self.annotate_prominent_tss(
+                            design, extract_enhancers, args.bigwig, full_original)
+                
+                if args.core_promoter and not args.original_bed:
+                    raise ValueError("Please provide the path to the original bed file(s).")
+                elif args.core_promoter:
+                    extract_enhancers = self.annotate_core_promoters(
+                        design, extract_enhancers, original_bed_design)
 
+                enhancer_file_path = f"{deseq_dir}/{design}_lfc.txt"
+                extract_enhancers.to_csv(enhancer_file_path, sep="\t", 
+                                         index=False, header=True)
             else:
                 print(f"No enhancers found for {design}.")
 
@@ -200,11 +244,68 @@ class ExtractEnhancer:
             f.write(f"Active rate: {active_rate:.3f}\n")
         f.close()
 
-    def annotate_extra_columns(self, enhancers: pd.DataFrame, design_dir: str) -> pd.DataFrame:
+    def annotate_extra_columns(self, enhancers: pd.DataFrame, original_bed: str) -> pd.DataFrame:
         """
-        """
-        pass
+        Annotate extra columns to the enhancers DataFrame.
+        (chrom, start, end)
 
+        Args:
+            enhancers (pd.DataFrame): DataFrame of extracted LFC values for elements.
+            original_bed (str): Path to the original bed file.
+        """
+        original_bed_df = pd.read_csv(original_bed, sep="\t", header=None)
+        original_bed_df.rename(columns={0: "chrom", 1: "start", 2: "end", 3: "name"}, inplace=True)
+        original_bed_df = original_bed_df[["name", "chrom", "start", "end"]]
+        enhancers = enhancers.merge(original_bed_df, on="name", how="left")
+        return enhancers
+
+    def annotate_prominent_tss(self, design: str, enhancers: pd.DataFrame, 
+                               bigwigs: str, full_original: str) -> pd.DataFrame:
+        """
+        Annotate the enhancer dataframe with the prominent TSS.
+
+        Args:
+            design (str): Name of the design.
+            enhancers (pd.DataFrame): Enhancer regions.
+            bigwigs (str): Path to the bigwig files.
+            full_original (str): Path to the full original bed file.
+        """
+        plus_bigwig, minus_bigwig = bigwigs
+        prominent_tss = helpers.get_prominent_tss(plus_bigwig, minus_bigwig, design, 
+                                                  enhancers, full_original)
+        return prominent_tss
+    
+    def annotate_core_promoters(self, design: str, enhancers: pd.DataFrame,
+                                original_bed: str) -> pd.DataFrame:
+        """
+        Annotate the enhancer dataframe with the core promoters.
+
+        Args:
+            design (str): Name of the design.
+            enhancers (pd.DataFrame): Enhancer regions.
+            original_bed (str): Path to the original bed file.
+        """
+        svr_dir = f"{args.outdir}/{args.starr}_{args.resolution}/SVR_predictions"
+        os.makedirs(svr_dir, exist_ok=True)
+        if not os.path.exists(self.fasta):
+            raise FileNotFoundError(f"Please have hg38.fa ready at {self.fasta}.")
+        
+        original_bed_df = pd.read_csv(original_bed, sep="\t", header=None)
+        original_bed_df.rename(columns={3: "name", 6: "thickStart", 7: "thickEnd"}, inplace=True)
+        original_bed_df = original_bed_df[["name", "thickStart", "thickEnd"]]
+        enhancers = enhancers.merge(original_bed_df, on="name", how="left")
+
+        if "tata" in design.lower():
+            core_promoters = helpers.add_svr_predictions(design, enhancers, 
+                                                         self.svr_tata, svr_dir, self.fasta)
+        elif "pause" in design.lower():
+            core_promoters = helpers.add_svr_predictions(design, enhancers, 
+                                                         self.svr_dpr, svr_dir, self.fasta)
+        else:
+            enhancers["Groups"] = "Others"
+            core_promoters = enhancers
+        
+        return core_promoters
 
 def main(args):
     """

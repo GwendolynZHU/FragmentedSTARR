@@ -89,7 +89,7 @@ class ProcessSTARR:
         """
         Generate the orientation-independent counts table across DNA and RNA replicates.
         """
-        combined_path = f"{self.outdir}/{self.file_source}/{self.design}"
+        combined_path = f"{self.outdir}/{self.file_source}_{self.resolution}/{self.design}"
 
         for orientation in ["f", "r"]:
             DNA_files = [f"{combined_path}/DNA{dna_idx}/aligned_count_{orientation}.bed" 
